@@ -14,6 +14,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/remotecommand"
 )
 
 type ContainerRequest struct {
@@ -133,6 +134,61 @@ func main() {
 			return
 		}
 		fmt.Fprintf(w, "Container deleted successfully")
+	})
+
+	http.HandleFunc("/exec", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		var req struct {
+			PodName   string   `json:"pod_name"`
+			Namespace string   `json:"namespace"`
+			Command   []string `json:"command"`
+		}
+
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		restClient := clientset.CoreV1().RESTClient()
+
+		execReq := restClient.Post().
+			Resource("pods").
+			Name(req.PodName).
+			Namespace(req.Namespace).
+			SubResource("exec").
+			VersionedParams(&corev1.PodExecOptions{
+				Command: req.Command,
+				Stdin:   true,
+				Stdout:  true,
+				Stderr:  true,
+				TTY:     true,
+			}, metav1.ParameterCodec)
+
+		executor, err := remotecommand.NewSPDYExecutor(config, "POST", execReq.URL())
+		if err != nil {
+			http.Error(w, fmt.Sprintf("Failed to create executor: %v", err), http.StatusInternalServerError)
+			return
+		}
+
+		var stdout, stderr bytes.Buffer
+		err = executor.StreamWithContext(context.TODO(), remotecommand.StreamOptions{
+			Stdin:  nil,
+			Stdout: &stdout,
+			Stderr: &stderr,
+			Tty:    true,
+		})
+
+		if err != nil {
+			http.Error(w, fmt.Sprintf("exec error: %v\n%s", err, stderr.String()), http.StatusInternalServerError)
+			return
+		}
+
+		w.WriteHeader(http.StatusOK)
+		w.Write(stdout.Bytes())
 	})
 
 	log.Fatal(http.ListenAndServe(":8080", nil))
